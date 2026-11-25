@@ -2236,6 +2236,10 @@ struct media_entity *camss_find_sensor(struct media_entity *entity)
 	struct media_pad *pad;
 
 	while (1) {
+		/* not yet through media_entity_pads_init(): no sensor behind it */
+		if (!entity->num_pads || !entity->pads)
+			return NULL;
+
 		pad = &entity->pads[0];
 		if (!(pad->flags & MEDIA_PAD_FL_SINK))
 			return NULL;
