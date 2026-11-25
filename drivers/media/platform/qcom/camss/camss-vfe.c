@@ -1727,10 +1727,10 @@ static int vfe_bpl_align(struct vfe_device *vfe)
  * @vfe: VFE device
  * @v4l2_dev: V4L2 device
  *
- * Initialize and register a subdev node for the VFE module. Then
- * call msm_video_register() to register the video device node which
- * will be connected to this subdev node. Then actually create the
- * media link between them.
+ * Initialize and register a subdev node for each line of the VFE module.
+ * Then call msm_video_register() to register the video device nodes which
+ * will be connected to these subdev nodes, and actually create the media
+ * links between them.
  *
  * Return 0 on success or a negative error code otherwise
  */
@@ -1744,12 +1744,15 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 	int ret;
 	int i;
 
+	/*
+	 * Every line's subdev and media pads first, the video nodes after: a video node
+	 * can be opened (udev's v4l_id does at once) as soon as it is registered, and
+	 * video_open() -> vfe_get() -> vfe_set_clock_rates() walks the media graph of
+	 * all lines of this VFE, so no line may still be without its pads then.
+	 */
 	for (i = 0; i < vfe->res->line_num; i++) {
-		char name[32];
-
 		sd = &vfe->line[i].subdev;
 		pads = vfe->line[i].pads;
-		video_out = &vfe->line[i].video_out;
 
 		v4l2_subdev_init(sd, &vfe_v4l2_ops);
 		sd->internal_ops = &vfe_v4l2_internal_ops;
@@ -1766,7 +1769,7 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 		ret = vfe_init_formats(sd, NULL);
 		if (ret < 0) {
 			dev_err(dev, "Failed to init format: %d\n", ret);
-			goto error_init;
+			goto error_subdevs;
 		}
 
 		pads[MSM_VFE_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
@@ -1778,14 +1781,22 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 					     pads);
 		if (ret < 0) {
 			dev_err(dev, "Failed to init media entity: %d\n", ret);
-			goto error_init;
+			goto error_subdevs;
 		}
 
 		ret = v4l2_device_register_subdev(v4l2_dev, sd);
 		if (ret < 0) {
 			dev_err(dev, "Failed to register subdev: %d\n", ret);
-			goto error_reg_subdev;
+			media_entity_cleanup(&sd->entity);
+			goto error_subdevs;
 		}
+	}
+
+	for (i = 0; i < vfe->res->line_num; i++) {
+		char name[32];
+
+		sd = &vfe->line[i].subdev;
+		video_out = &vfe->line[i].video_out;
 
 		video_out->ops = &vfe->video_ops;
 		video_out->bpl_alignment = vfe_bpl_align(vfe);
@@ -1804,7 +1815,7 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 		if (ret < 0) {
 			dev_err(dev, "Failed to register video node: %d\n",
 				ret);
-			goto error_reg_video;
+			goto error_videos;
 		}
 
 		ret = media_create_pad_link(
@@ -1815,27 +1826,22 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 			dev_err(dev, "Failed to link %s->%s entities: %d\n",
 				sd->entity.name, video_out->vdev.entity.name,
 				ret);
-			goto error_link;
+			msm_video_unregister(video_out);
+			goto error_videos;
 		}
 	}
 
 	return 0;
 
-error_link:
-	msm_video_unregister(video_out);
+error_videos:
+	for (i--; i >= 0; i--)
+		msm_video_unregister(&vfe->line[i].video_out);
+	i = vfe->res->line_num;
 
-error_reg_video:
-	v4l2_device_unregister_subdev(sd);
-
-error_reg_subdev:
-	media_entity_cleanup(&sd->entity);
-
-error_init:
+error_subdevs:
 	for (i--; i >= 0; i--) {
 		sd = &vfe->line[i].subdev;
-		video_out = &vfe->line[i].video_out;
 
-		msm_video_unregister(video_out);
 		v4l2_device_unregister_subdev(sd);
 		media_entity_cleanup(&sd->entity);
 	}
