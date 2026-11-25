@@ -26,6 +26,7 @@ Checked on a Xiaomi Pad 5 (Wi-Fi model) running VibeOS, November 2026:
 | Speakers | the four CS35L41 amps (VibeOS adds a speaker protection filter in PipeWire) |
 | Microphones | through the WCD9340 codec on SLIMbus, every capture (see the revert below) |
 | Video | Iris hardware decode of H.264 and HEVC |
+| Cameras | OV13B10 rear and OV8856 front through camss and libcamera (software ISP); stills checked with the screen off |
 | Sensors | accelerometer and ambient light sensor through the SLPI's sensor core (hexagonrpcd and libssc in userspace) |
 | Battery | charge level and rate; USB PD charging at 9 V through the PM8150B (about 8 W into the battery) |
 | USB | device mode (gadget network) |
@@ -34,10 +35,8 @@ Checked on a Xiaomi Pad 5 (Wi-Fi model) running VibeOS, November 2026:
 Not done
 ========
 
-* **Cameras: detected, not streaming yet.** Both sensors probe over CCI (OV13B10 rear, OV8856 front), the
-  camera subsystem registers all its video nodes, and libcamera lists both cameras. Streaming fails: after
-  the first power-up, VFE0/VFE1 and their CSIDs time out on reset ("VFE reset timeout", "CSID reset timeout",
-  "Failed to power up pipeline: -5"). VibeOS keeps `qcom_camss` off until this is fixed.
+* **Cameras: no tuning yet.** libcamera has no sensor helpers or tuning files for the OV13B10 and OV8856,
+  so its software ISP runs uncalibrated. Video recording and camera apps not checked yet.
 * **Fast charging:** the 33 W charge pump (LN8000, `charger@51` in the device tree) does not answer, so
   charging runs on the PM8150B alone.
 * **Bluetooth:** the controller powers up and its firmware loads; pairing and audio not checked yet.
@@ -69,6 +68,14 @@ On top of Kumar-Jy's v7.3.6-0:
   the VFE's power lock held, so every later open of a video node hung. Now all 16 video nodes open and
   return.
 * **camss: `camss_find_sensor()` returns no sensor for an entity without pads**, as a guard.
+* **"media: qcom: camss: Power pipeline only when streaming"** (upstream 164202f68203, in Linux since
+  v6.17), applied again: the import of the nabu camss had undone it. With the pipeline powered from
+  `open()`, PipeWire's libcamera monitor, which keeps a video node open, held VFE0 powered at its highest
+  clock from early boot, and CSID and VFE resets then timed out. Now a node held open costs nothing,
+  and the pipeline powers up for streaming only.
+* **camss: a CSID that fails to power on puts its VFE back.** `csid_set_power()` took the parent VFE first
+  but returned on its error paths without putting it, so each failed CSID power-on left the VFE powered
+  for good. The error paths now unwind in order and put the VFE last.
 
 Build
 =====
