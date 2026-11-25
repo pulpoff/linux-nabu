@@ -88,6 +88,17 @@ enum camss_version {
 	CAMSS_845,
 };
 
+struct dev_pm_domain_list;
+
+/*
+ * A camss clock whose rate needs a minimum MMCX level, and its column in the
+ * opp-hz of the camss OPP table.
+ */
+struct camss_mmcx_clk {
+	const char *name;
+	u32 index;
+};
+
 enum icc_count {
 	ICC_DEFAULT_COUNT = 0,
 	ICC_SM8250_COUNT = 4,
@@ -107,6 +118,9 @@ struct camss_resources {
 	const unsigned int csid_num;
 	const unsigned int vfe_num;
 	int (*link_entities)(struct camss *camss);
+	const char * const *mmcx_opp_clks;
+	const struct camss_mmcx_clk *mmcx_clk;
+	const unsigned int mmcx_clk_num;
 };
 
 struct camss {
@@ -125,6 +139,10 @@ struct camss {
 	struct device_link *genpd_link;
 	struct icc_path *icc_path[ICC_SM8250_COUNT];
 	const struct camss_resources *res;
+	struct dev_pm_domain_list *mmcx_pd;
+	struct mutex mmcx_lock;
+	unsigned long mmcx_voted;
+	bool mmcx;
 };
 
 struct camss_camera_interface {
@@ -163,5 +181,9 @@ void camss_pm_domain_off(struct camss *camss, int id);
 int camss_vfe_get(struct camss *camss, int id);
 void camss_vfe_put(struct camss *camss, int id);
 void camss_delete(struct camss *camss);
+unsigned long camss_mmcx_need(struct camss *camss, const char *clk_name,
+			      unsigned long rate);
+int camss_mmcx_set_need(struct camss *camss, unsigned long *need,
+			unsigned long value);
 
 #endif /* QC_MSM_CAMSS_H */

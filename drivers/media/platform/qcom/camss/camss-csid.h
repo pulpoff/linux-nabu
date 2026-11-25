@@ -180,6 +180,7 @@ struct csid_device {
 	struct v4l2_ctrl_handler ctrls;
 	struct v4l2_ctrl *testgen_mode;
 	const struct csid_subdev_resources *res;
+	unsigned long mmcx_need;
 };
 
 struct camss_subdev_resources;

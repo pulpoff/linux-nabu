@@ -16,6 +16,7 @@
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/of_graph.h>
+#include <linux/pm_opp.h>
 #include <linux/pm_runtime.h>
 #include <linux/pm_domain.h>
 #include <linux/slab.h>
@@ -2888,6 +2889,172 @@ fail_pm:
 	return ret;
 }
 
+/*
+ * MMCX votes. Each IFE, CAMNOC and CSID rate needs a minimum MMCX level (on
+ * SM8150 an IFE at 950 MHz and the CAMNOC at 480 MHz need TURBO), but camcc
+ * itself only votes for LOW_SVS. Without a vote of its own, camss runs on
+ * whatever level other users of MMCX hold: with the display on it works, with
+ * the panel off the IFE and CSID resets time out.
+ *
+ * The camss OPP table lists, per MMCX level, the highest rate of each kind of
+ * camss clock (one opp-hz column each) and that level as its required OPP.
+ * Every VFE and CSID records the level its rates need (as the first column's
+ * rate of the lowest OPP that covers them), and camss votes for the highest.
+ * camss keeps setting its clocks itself; the OPP core only votes.
+ */
+static int camss_mmcx_config_clks(struct device *dev,
+				  struct opp_table *opp_table,
+				  struct dev_pm_opp *opp, void *data,
+				  bool scaling_down)
+{
+	return 0;
+}
+
+static int camss_mmcx_init(struct camss *camss)
+{
+	const struct camss_resources *res = camss->res;
+	struct device *dev = camss->dev;
+	struct dev_pm_domain_attach_data pd_data = {
+		.pd_names = (const char * const []) { "mmcx" },
+		.num_pd_names = 1,
+		.pd_flags = PD_FLAG_DEV_LINK_ON | PD_FLAG_REQUIRED_OPP,
+	};
+	struct dev_pm_opp_config opp_config = {
+		.clk_names = res->mmcx_opp_clks,
+		.config_clks = camss_mmcx_config_clks,
+	};
+	int ret;
+
+	mutex_init(&camss->mmcx_lock);
+
+	/* A DT without the table and the domain: no votes, as before */
+	if (!res->mmcx_opp_clks ||
+	    of_property_match_string(dev->of_node, "power-domain-names",
+				     "mmcx") < 0 ||
+	    !of_property_present(dev->of_node, "operating-points-v2"))
+		return 0;
+
+	ret = devm_pm_domain_attach_list(dev, &pd_data, &camss->mmcx_pd);
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "Failed to attach MMCX\n");
+
+	ret = devm_pm_opp_set_config(dev, &opp_config);
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "Failed to set the OPP config\n");
+
+	ret = devm_pm_opp_of_add_table(dev);
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to add the OPP table\n");
+
+	camss->mmcx = true;
+
+	return 0;
+}
+
+/*
+ * camss_mmcx_need - The MMCX level a clock rate needs
+ * @camss: CAMSS device
+ * @clk_name: Name of a VFE or CSID clock
+ * @rate: The rate it is about to run at
+ *
+ * Return the level as the first column's rate of the lowest OPP that covers
+ * @rate, or 0 when there are no votes or the clock needs none
+ */
+unsigned long camss_mmcx_need(struct camss *camss, const char *clk_name,
+			      unsigned long rate)
+{
+	const struct camss_resources *res = camss->res;
+	struct dev_pm_opp *opp;
+	unsigned long key = rate;
+	unsigned int i;
+
+	if (!camss->mmcx || !rate)
+		return 0;
+
+	for (i = 0; i < res->mmcx_clk_num; i++)
+		if (!strcmp(res->mmcx_clk[i].name, clk_name))
+			break;
+
+	if (i == res->mmcx_clk_num)
+		return 0;
+
+	opp = dev_pm_opp_find_freq_ceil_indexed(camss->dev, &key,
+						res->mmcx_clk[i].index);
+	if (IS_ERR(opp)) {
+		dev_warn_once(camss->dev,
+			      "%s at %lu Hz is above the OPP table\n",
+			      clk_name, rate);
+		key = ULONG_MAX;
+		opp = dev_pm_opp_find_freq_floor_indexed(camss->dev, &key, 0);
+		if (IS_ERR(opp))
+			return 0;
+	}
+
+	key = dev_pm_opp_get_freq_indexed(opp, 0);
+	dev_pm_opp_put(opp);
+
+	return key;
+}
+
+/*
+ * camss_mmcx_set_need - Record what a VFE or CSID needs, vote the highest
+ * @camss: CAMSS device
+ * @need: The block's record
+ * @value: Its new need, from camss_mmcx_need(), 0 for none
+ *
+ * Raise a need before the clocks go up, drop it after they went down.
+ *
+ * Return 0 on success or a negative error code otherwise
+ */
+int camss_mmcx_set_need(struct camss *camss, unsigned long *need,
+			unsigned long value)
+{
+	unsigned long top = 0;
+	struct dev_pm_opp *opp;
+	unsigned int i;
+	int ret = 0;
+
+	if (!camss->mmcx)
+		return 0;
+
+	mutex_lock(&camss->mmcx_lock);
+
+	*need = value;
+
+	for (i = 0; i < camss->res->vfe_num; i++)
+		top = max(top, camss->vfe[i].mmcx_need);
+	for (i = 0; i < camss->res->csid_num; i++)
+		top = max(top, camss->csid[i].mmcx_need);
+
+	if (top == camss->mmcx_voted)
+		goto out;
+
+	if (top) {
+		unsigned long key = top;
+
+		opp = dev_pm_opp_find_freq_ceil_indexed(camss->dev, &key, 0);
+		if (IS_ERR(opp)) {
+			ret = PTR_ERR(opp);
+			goto out;
+		}
+		ret = dev_pm_opp_set_opp(camss->dev, opp);
+		dev_pm_opp_put(opp);
+	} else {
+		ret = dev_pm_opp_set_opp(camss->dev, NULL);
+	}
+
+	if (ret)
+		dev_err(camss->dev, "Failed to vote MMCX for %lu: %d\n", top,
+			ret);
+	else
+		camss->mmcx_voted = top;
+
+out:
+	mutex_unlock(&camss->mmcx_lock);
+
+	return ret;
+}
+
 static int camss_icc_get(struct camss *camss)
 {
 	const struct resources_icc *icc_res;
@@ -2973,6 +3140,10 @@ static int camss_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ret = camss_icc_get(camss);
+	if (ret < 0)
+		return ret;
+
+	ret = camss_mmcx_init(camss);
 	if (ret < 0)
 		return ret;
 
@@ -3151,6 +3322,26 @@ static const struct camss_resources sdm845_resources = {
 	.link_entities = camss_link_entities
 };
 
+/*
+ * The opp-hz columns of the SM8150 camss OPP table: per MMCX level, the
+ * highest IFE, CAMNOC AXI, IFE lite and CSID rate camcc allows at it.
+ */
+static const char * const camss_mmcx_opp_clks_sm8150[] = {
+	"vfe0", "camnoc_axi", "vfe_lite0", "vfe0_csid", NULL
+};
+
+static const struct camss_mmcx_clk camss_mmcx_clk_sm8150[] = {
+	{ "vfe0", 0 },
+	{ "vfe1", 0 },
+	{ "camnoc_axi", 1 },
+	{ "vfe_lite0", 2 },
+	{ "vfe_lite1", 2 },
+	{ "vfe0_csid", 3 },
+	{ "vfe1_csid", 3 },
+	{ "vfe_lite0_csid", 3 },
+	{ "vfe_lite1_csid", 3 },
+};
+
 static const struct camss_resources sm8150_resources = {
 	.version = CAMSS_8150,
 	.pd_name = "top",
@@ -3163,7 +3354,10 @@ static const struct camss_resources sm8150_resources = {
 	.csid_num = ARRAY_SIZE(csid_res_sm8150),
 	.vfe_num = ARRAY_SIZE(vfe_res_sm8150),
 	.icc_path_num = ARRAY_SIZE(icc_res_sm8150),
-	.link_entities = camss_link_entities
+	.link_entities = camss_link_entities,
+	.mmcx_opp_clks = camss_mmcx_opp_clks_sm8150,
+	.mmcx_clk = camss_mmcx_clk_sm8150,
+	.mmcx_clk_num = ARRAY_SIZE(camss_mmcx_clk_sm8150),
 };
 
 static const struct camss_resources sm8250_resources = {

@@ -650,6 +650,8 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 {
 	struct device *dev = vfe->camss->dev;
 	u64 pixel_clock[VFE_LINE_NUM_MAX];
+	long rates[CAMSS_RES_MAX];
+	unsigned long need = 0;
 	int i, j;
 	int ret;
 
@@ -662,6 +664,8 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 
 	for (i = 0; i < vfe->nclocks; i++) {
 		struct camss_clock *clock = &vfe->clock[i];
+
+		rates[i] = 0;
 
 		if (vfe_match_clock_names(vfe, clock)) {
 			u64 min_rate = 0;
@@ -710,11 +714,26 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 				return -EINVAL;
 			}
 
-			ret = clk_set_rate(clock->clk, rate);
-			if (ret < 0) {
-				dev_err(dev, "clk set rate failed: %d\n", ret);
-				return ret;
-			}
+			rates[i] = rate;
+			need = max(need, camss_mmcx_need(vfe->camss, clock->name,
+							 clock->freq[j]));
+		}
+	}
+
+	/* MMCX up before the rates */
+	ret = camss_mmcx_set_need(vfe->camss, &vfe->mmcx_need, need);
+	if (ret < 0)
+		return ret;
+
+	for (i = 0; i < vfe->nclocks; i++) {
+		if (!rates[i])
+			continue;
+
+		ret = clk_set_rate(vfe->clock[i].clk, rates[i]);
+		if (ret < 0) {
+			dev_err(dev, "clk set rate failed: %d\n", ret);
+			camss_mmcx_set_need(vfe->camss, &vfe->mmcx_need, 0);
+			return ret;
 		}
 	}
 
@@ -832,6 +851,7 @@ error_reset:
 	camss_disable_clocks(vfe->nclocks, vfe->clock);
 
 error_pm_runtime_get:
+	camss_mmcx_set_need(vfe->camss, &vfe->mmcx_need, 0);
 	pm_runtime_put_sync(vfe->camss->dev);
 error_domain_off:
 	vfe->res->hw_ops->pm_domain_off(vfe);
@@ -859,6 +879,7 @@ void vfe_put(struct vfe_device *vfe)
 			vfe->res->hw_ops->vfe_halt(vfe);
 		}
 		camss_disable_clocks(vfe->nclocks, vfe->clock);
+		camss_mmcx_set_need(vfe->camss, &vfe->mmcx_need, 0);
 		pm_runtime_put_sync(vfe->camss->dev);
 		vfe->res->hw_ops->pm_domain_off(vfe);
 	}

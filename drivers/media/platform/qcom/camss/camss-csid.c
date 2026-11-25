@@ -532,6 +532,8 @@ static int csid_set_clock_rates(struct csid_device *csid)
 {
 	struct device *dev = csid->camss->dev;
 	const struct csid_format_info *fmt;
+	unsigned long rates[CAMSS_RES_MAX];
+	unsigned long need = 0;
 	s64 link_freq;
 	int i, j;
 	int ret;
@@ -545,6 +547,8 @@ static int csid_set_clock_rates(struct csid_device *csid)
 
 	for (i = 0; i < csid->nclocks; i++) {
 		struct camss_clock *clock = &csid->clock[i];
+
+		rates[i] = 0;
 
 		if (!strcmp(clock->name, "csi0") ||
 		    !strcmp(clock->name, "csi1") ||
@@ -577,13 +581,42 @@ static int csid_set_clock_rates(struct csid_device *csid)
 				return -EINVAL;
 			}
 
-			ret = clk_set_rate(clock->clk, rate);
+			rates[i] = rate;
+			need = max(need, camss_mmcx_need(csid->camss,
+							 clock->name,
+							 clock->freq[j]));
+		} else if (clock->nfreqs) {
+			rates[i] = clock->freq[0];
+			need = max(need, camss_mmcx_need(csid->camss,
+							 clock->name,
+							 clock->freq[0]));
+		}
+	}
+
+	/* MMCX up before the rates */
+	ret = camss_mmcx_set_need(csid->camss, &csid->mmcx_need, need);
+	if (ret < 0)
+		return ret;
+
+	for (i = 0; i < csid->nclocks; i++) {
+		struct camss_clock *clock = &csid->clock[i];
+
+		if (!rates[i])
+			continue;
+
+		if (!strcmp(clock->name, "csi0") ||
+		    !strcmp(clock->name, "csi1") ||
+		    !strcmp(clock->name, "csi2") ||
+		    !strcmp(clock->name, "csi3")) {
+			ret = clk_set_rate(clock->clk, rates[i]);
 			if (ret < 0) {
 				dev_err(dev, "clk set rate failed: %d\n", ret);
+				camss_mmcx_set_need(csid->camss,
+						    &csid->mmcx_need, 0);
 				return ret;
 			}
-		} else if (clock->nfreqs) {
-			clk_set_rate(clock->clk, clock->freq[0]);
+		} else {
+			clk_set_rate(clock->clk, rates[i]);
 		}
 	}
 
@@ -629,7 +662,7 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
 
 		ret = camss_enable_clocks(csid->nclocks, csid->clock, dev);
 		if (ret < 0)
-			goto error_regulators;
+			goto error_mmcx;
 
 		csid->phy.need_vc_update = true;
 
@@ -639,13 +672,14 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
 		if (ret < 0) {
 			disable_irq(csid->irq);
 			camss_disable_clocks(csid->nclocks, csid->clock);
-			goto error_regulators;
+			goto error_mmcx;
 		}
 
 		csid->res->hw_ops->hw_version(csid);
 	} else {
 		disable_irq(csid->irq);
 		camss_disable_clocks(csid->nclocks, csid->clock);
+		camss_mmcx_set_need(camss, &csid->mmcx_need, 0);
 		regulator_bulk_disable(csid->num_supplies,
 				       csid->supplies);
 		pm_runtime_put_sync(dev);
@@ -654,6 +688,8 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
 
 	return ret;
 
+error_mmcx:
+	camss_mmcx_set_need(camss, &csid->mmcx_need, 0);
 error_regulators:
 	regulator_bulk_disable(csid->num_supplies, csid->supplies);
 error_pm_runtime:
