@@ -12,6 +12,14 @@ postmarketOS and mainline Linux.
 
 Use the `main` branch.
 
+Releases
+========
+
+The kernel each VibeOS release ships for the Xiaomi Pad 5 is tagged here:
+
+- `vibeos-0.1.5`: VibeOS 0.1.5. The kernel, modules and boot image of this tree at that point, and its
+  `qcom-camss` module with the two camss fixes the tag carries.
+
 What works
 ==========
 
