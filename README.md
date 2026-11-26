@@ -21,29 +21,38 @@ Checked on a Xiaomi Pad 5 (Wi-Fi model) running VibeOS, November 2026:
 | --- | --- |
 | Display | 1600x2560 at 120 Hz over dual DSI; rotation from the accelerometer |
 | Touchscreen | NT36523, ready from the initramfs |
-| GPU | Adreno 640 with Mesa (Freedreno, Turnip Vulkan); GNOME Shell runs on it |
+| GPU | Adreno 640 with Mesa: OpenGL (Freedreno) and Vulkan (Turnip); GNOME Shell runs on it |
 | Wi-Fi | WCN3998 (`ath10k_snoc`), 2.4 and 5 GHz |
+| Bluetooth | the WCN3998's Bluetooth: the adapter powers up with its firmware and scans; pairing and audio not checked yet |
 | Speakers | the four CS35L41 amps (VibeOS adds a speaker protection filter in PipeWire) |
 | Microphones | through the WCD9340 codec on SLIMbus, every capture (see the revert below) |
-| Video | Iris hardware decode of H.264 and HEVC |
-| Cameras | OV13B10 rear and OV8856 front through camss and libcamera (software ISP); stills checked with the screen off |
+| Cameras | OV13B10 rear and OV8856 front, through camss and libcamera (software ISP): photos and 1080p video; colours not tuned yet |
+| Video | Iris hardware decode of H.264 |
 | Sensors | accelerometer and ambient light sensor through the SLPI's sensor core (hexagonrpcd and libssc in userspace) |
-| Battery | charge level and rate; USB PD charging at 9 V through the PM8150B (about 8 W into the battery) |
+| Battery | charge level and rate |
 | USB | device mode (gadget network) |
-| Suspend | s2idle: wakes on a timer, and Wi-Fi, Bluetooth, USB and the sensors come back |
+
+Known issues
+============
+
+* **No hardware video encoding.** Iris's encoder resets the tablet, so VibeOS records video with a software
+  encoder.
+* **HEVC and VP9 play in software.** Iris's HEVC decoding crashes its firmware, so only H.264 is decoded in
+  hardware.
+* **Cameras: no tuning yet.** libcamera has no sensor helpers or tuning files for the OV13B10 and OV8856,
+  so its software ISP runs uncalibrated: the colours are off.
+* **Charging is slow, about 8 W.** USB PD charging runs at 9 V through the PM8150B alone: the 33 W charge
+  pump (LN8000, `charger@51` in the device tree) does not answer, so there is no fast charging.
 
 Not done
 ========
 
-* **Cameras: no tuning yet.** libcamera has no sensor helpers or tuning files for the OV13B10 and OV8856,
-  so its software ISP runs uncalibrated. Video recording and camera apps not checked yet.
-* **Fast charging:** the 33 W charge pump (LN8000, `charger@51` in the device tree) does not answer, so
-  charging runs on the PM8150B alone.
-* **Bluetooth:** the controller powers up and its firmware loads; pairing and audio not checked yet.
+* **Sleep: not yet.** A manual s2idle test suspends and wakes on a timer, and Wi-Fi, Bluetooth, USB and the
+  sensors come back, but VibeOS does not suspend the tablet yet. Waking with the power key, the cover or the
+  charger, and the battery drain asleep, are not checked yet.
 * **Backlight:** the KTZ8866 driver is up; changing the brightness not checked yet.
 * **Magnetometer:** reads a steady heading; whether it points right not checked yet.
-* Not checked: the pen, typing on the keyboard cover (it is detected), USB host mode, USB-C headphones,
-  waking from suspend with the power key, and the battery drain asleep.
+* Not checked: the pen, typing on the keyboard cover (it is detected), USB host mode, USB-C headphones.
 * No vibration motor driver.
 
 Changes for VibeOS
